@@ -2,30 +2,30 @@ from flask import (
     Flask, render_template, request,
     redirect, url_for, flash, session
 )
-from flask_pymongo import PyMongo
-from bson.objectid import ObjectId
-from functools import wraps # Import wraps for decorator
+from flask_migrate import Migrate
+from models import (
+    db, User, Lab, Category, Component, Transaction
+)
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from functools import wraps
 
 from config import Config
-from models import LabModel, CategoryModel, ComponentModel, TransactionModel
-
 
 app = Flask(__name__)
 app.config.from_object(Config)
 
-mongo = PyMongo(app)
-db = mongo.db
+# Initialize extensions
+db.init_app(app)
+migrate = Migrate(app, db)
+
+IST = ZoneInfo("Asia/Kolkata")
 
 # ---------------------- Authentication Logic ---------------------- #
-
-# Hardcoded Credentials
-ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "admin123"
-
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if 'user' not in session:
+        if 'user_id' not in session:
             flash("Please log in to access this page.", "warning")
             return redirect(url_for('login'))
         return f(*args, **kwargs)
@@ -33,16 +33,18 @@ def login_required(f):
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    # If already logged in, redirect to dashboard
-    if 'user' in session:
+    if 'user_id' in session:
         return redirect(url_for('index'))
 
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "").strip()
 
-        if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
-            session['user'] = username
+        user = User.query.filter_by(username=username).first()
+        
+        if user and user.check_password(password):
+            session['user_id'] = user.id
+            session['user'] = user.username
             flash("Welcome back, Admin!", "success")
             return redirect(url_for('index'))
         else:
@@ -52,92 +54,71 @@ def login():
 
 @app.route("/logout")
 def logout():
+    session.pop('user_id', None)
     session.pop('user', None)
     flash("You have been logged out.", "info")
     return redirect(url_for('login'))
 
-
 # ---------------------- Helper: dashboard stats ---------------------- #
 def get_dashboard_stats():
-    total_components = db.components.count_documents({})
-    total_transactions = db.transactions.count_documents({})
+    total_components = Component.query.count()
+    total_transactions = Transaction.query.count()
+    total_labs = Lab.query.count()
+    total_categories = Category.query.count()
     
-    # NEW: Count Labs and Categories
-    total_labs = db.labs.count_documents({})
-    total_categories = db.categories.count_documents({})
+    pending_returns = Transaction.query.filter(
+        Transaction.status.in_(["Issued", "Partially Returned"])
+    ).count()
 
-    # NEW: Count Pending Returns (Items that are currently issued out)
-    pending_returns = db.transactions.count_documents({
-        "status": {"$in": ["Issued", "Partially Returned"]}
-    })
+    low_stock_components = Component.query.filter(
+        Component.quantity <= Component.min_stock_level
+    ).count()
 
-    low_stock_components = db.components.count_documents({
-        "$expr": {"$lte": ["$quantity", "$min_stock_level"]}
-    })
-
-    out_of_stock_components = db.components.count_documents({
-        "$or": [
-            {"quantity": {"$lte": 0}},
-            {"quantity": {"$exists": False}}
-        ]
-    })
+    out_of_stock_components = Component.query.filter(
+        db.or_(
+            Component.quantity <= 0,
+            Component.quantity.is_(None)
+        )
+    ).count()
 
     # Lab stats: number of components per lab
-    lab_stats_pipeline = [
-        {
-            "$lookup": {
-                "from": "labs",
-                "localField": "lab_id",
-                "foreignField": "_id",
-                "as": "lab"
-            }
-        },
-        {"$unwind": {"path": "$lab", "preserveNullAndEmptyArrays": True}},
-        {
-            "$group": {
-                "_id": "$lab._id",
-                "lab_name": {"$first": "$lab.name"},
-                "component_count": {"$sum": 1}
-            }
-        },
-        {"$sort": {"lab_name": 1}}
-    ]
-    lab_stats = list(db.components.aggregate(lab_stats_pipeline))
+    lab_stats = db.session.query(
+        Lab.name,
+        db.func.count(Component.id).label('component_count')
+    ).join(
+        Component, Lab.id == Component.lab_id, isouter=True
+    ).group_by(Lab.id).order_by(Lab.name).all()
 
-    recent_transactions = TransactionModel.get_recent(db, limit=5)
+    recent_transactions = Transaction.query.order_by(
+        Transaction.issue_date.desc()
+    ).limit(5).all()
 
     return {
         "total_components": total_components,
         "total_transactions": total_transactions,
-        "total_labs": total_labs,              # Added
-        "total_categories": total_categories,  # Added
-        "pending_returns": pending_returns,    # Added
+        "total_labs": total_labs,
+        "total_categories": total_categories,
+        "pending_returns": pending_returns,
         "low_stock_components": low_stock_components,
         "out_of_stock_components": out_of_stock_components,
         "lab_stats": lab_stats,
         "recent_transactions": recent_transactions
     }
 
-
 # ---------------------- Routes (Protected) ---------------------- #
-
 @app.route("/")
 @login_required
 def index():
     stats = get_dashboard_stats()
 
     # For quick charts on dashboard: transaction counts by STATUS
-    trans_type_agg = list(db.transactions.aggregate([
-        {
-            "$group": {
-                "_id": "$status",
-                "count": {"$sum": 1}
-            }
-        }
-    ]))
+    trans_type_agg = db.session.query(
+        Transaction.status,
+        db.func.count(Transaction.id).label('count')
+    ).group_by(Transaction.status).all()
 
-    transaction_types = [t["_id"] or "Unknown" for t in trans_type_agg]
-    transaction_counts = [t["count"] for t in trans_type_agg]
+    transaction_types = [t[0] or "Unknown" for t in trans_type_agg]
+    transaction_counts = [t[1] for t in trans_type_agg]
 
     return render_template(
         "index.html",
@@ -146,9 +127,7 @@ def index():
         transaction_counts=transaction_counts
     )
 
-
 # ---------------------- Labs CRUD ---------------------- #
-
 @app.route("/labs", methods=["GET", "POST"])
 @login_required
 def labs():
@@ -160,18 +139,19 @@ def labs():
         if not name:
             flash("Lab name is required.", "danger")
         else:
-            LabModel.create(db, name, location, description)
+            lab = Lab(name=name, location=location, description=description)
+            db.session.add(lab)
+            db.session.commit()
             flash("Lab added successfully.", "success")
             return redirect(url_for("labs"))
 
-    labs_list = LabModel.get_all(db)
+    labs_list = Lab.query.order_by(Lab.name).all()
     return render_template("labs.html", labs=labs_list)
 
-
-@app.route("/labs/<lab_id>/edit", methods=["GET", "POST"])
+@app.route("/labs/<int:lab_id>/edit", methods=["GET", "POST"])
 @login_required
 def edit_lab(lab_id):
-    lab = LabModel.get_by_id(db, lab_id)
+    lab = Lab.query.get(lab_id)
     if not lab:
         flash("Lab not found.", "danger")
         return redirect(url_for("labs"))
@@ -184,32 +164,35 @@ def edit_lab(lab_id):
         if not name:
             flash("Lab name is required.", "danger")
         else:
-            LabModel.update(db, lab_id, name, location, description)
+            lab.name = name
+            lab.location = location
+            lab.description = description
+            db.session.commit()
             flash("Lab updated successfully.", "success")
             return redirect(url_for("labs"))
 
     return render_template("edit_lab.html", lab=lab)
 
-
-@app.route("/labs/<lab_id>/delete", methods=["POST"])
+@app.route("/labs/<int:lab_id>/delete", methods=["POST"])
 @login_required
 def delete_lab(lab_id):
-    LabModel.delete(db, lab_id)
-    flash("Lab deleted.", "info")
+    lab = Lab.query.get(lab_id)
+    if lab:
+        db.session.delete(lab)
+        db.session.commit()
+        flash("Lab deleted.", "info")
     return redirect(url_for("labs"))
 
-
-# 🔹 NEW: View components for a specific lab only
-@app.route("/labs/<lab_id>/components")
+@app.route("/labs/<int:lab_id>/components")
 @login_required
 def lab_components(lab_id):
-    lab = LabModel.get_by_id(db, lab_id)
+    lab = Lab.query.get(lab_id)
     if not lab:
         flash("Lab not found.", "danger")
         return redirect(url_for("labs"))
 
-    components_list = ComponentModel.get_by_lab(db, lab_id)
-    components_list = ComponentModel.enrich_with_status(db, components_list)
+    components_list = Component.query.filter_by(lab_id=lab_id).order_by(Component.name).all()
+    components_list = enrich_components_with_status(components_list)
 
     return render_template(
         "components.html",
@@ -217,13 +200,11 @@ def lab_components(lab_id):
         selected_lab=lab
     )
 
-
-# ---------------------- Categories CRUD (Lab-wise) ---------------------- #
-
+# ---------------------- Categories CRUD ---------------------- #
 @app.route("/categories", methods=["GET", "POST"])
 @login_required
 def categories():
-    labs = LabModel.get_all(db)
+    labs = Lab.query.order_by(Lab.name).all()
 
     if request.method == "POST":
         lab_id = request.form.get("lab_id")
@@ -233,28 +214,32 @@ def categories():
         if not (lab_id and name):
             flash("Lab and Category name are required.", "danger")
         else:
-            CategoryModel.create(db, name, description, lab_id)
+            category = Category(
+                name=name, 
+                description=description, 
+                lab_id=lab_id
+            )
+            db.session.add(category)
+            db.session.commit()
             flash("Category added successfully.", "success")
             return redirect(url_for("categories"))
 
-    categories_list = CategoryModel.get_all(db)
-
+    categories_list = Category.query.order_by(Category.name).all()
     return render_template(
         "categories.html",
         categories=categories_list,
         labs=labs
     )
 
-
-@app.route("/categories/<category_id>/edit", methods=["GET", "POST"])
+@app.route("/categories/<int:category_id>/edit", methods=["GET", "POST"])
 @login_required
 def edit_category(category_id):
-    category = CategoryModel.get_by_id(db, category_id)
+    category = Category.query.get(category_id)
     if not category:
         flash("Category not found.", "danger")
         return redirect(url_for("categories"))
 
-    labs = LabModel.get_all(db)
+    labs = Lab.query.order_by(Lab.name).all()
 
     if request.method == "POST":
         lab_id = request.form.get("lab_id")
@@ -264,37 +249,60 @@ def edit_category(category_id):
         if not (lab_id and name):
             flash("Lab and Category name are required.", "danger")
         else:
-            CategoryModel.update(db, category_id, name, description, lab_id)
+            category.name = name
+            category.description = description
+            category.lab_id = lab_id
+            db.session.commit()
             flash("Category updated successfully.", "success")
             return redirect(url_for("categories"))
 
     return render_template("edit_category.html", category=category, labs=labs)
 
-
-@app.route("/categories/<category_id>/delete", methods=["POST"])
+@app.route("/categories/<int:category_id>/delete", methods=["POST"])
 @login_required
 def delete_category(category_id):
-    CategoryModel.delete(db, category_id)
-    flash("Category deleted.", "info")
+    category = Category.query.get(category_id)
+    if category:
+        db.session.delete(category)
+        db.session.commit()
+        flash("Category deleted.", "info")
     return redirect(url_for("categories"))
 
-
 # ---------------------- Components CRUD ---------------------- #
+def enrich_components_with_status(components):
+    for c in components:
+        qty = c.quantity or 0
+        min_stock = c.min_stock_level or 0
+
+        if qty <= 0:
+            stock_state = "Out of Stock"
+            stock_class = "out"
+        elif qty <= min_stock:
+            stock_state = "Low Stock"
+            stock_class = "low"
+        else:
+            stock_state = "In Stock"
+            stock_class = "instock"
+
+        c.stock_state = stock_state
+        c.stock_state_class = stock_class
+        c.status_label = stock_state
+        c.status_detail = ""
+
+    return components
 
 @app.route("/components")
 @login_required
 def components():
-    components_list = ComponentModel.get_all(db)
-    components_list = ComponentModel.enrich_with_status(db, components_list)
-    # selected_lab is None here; template will show "All Components"
+    components_list = Component.query.order_by(Component.name).all()
+    components_list = enrich_components_with_status(components_list)
     return render_template("components.html", components=components_list, selected_lab=None)
-
 
 @app.route("/components/add", methods=["GET", "POST"])
 @login_required
 def add_component():
-    labs = LabModel.get_all(db)
-    categories = CategoryModel.get_all(db)
+    labs = Lab.query.order_by(Lab.name).all()
+    categories = Category.query.order_by(Category.name).all()
 
     if request.method == "POST":
         name = request.form.get("name", "").strip()
@@ -309,11 +317,18 @@ def add_component():
         if not (name and category_id and lab_id):
             flash("Name, category, and lab are required.", "danger")
         else:
-            ComponentModel.create(
-                db, name, category_id, lab_id,
-                quantity, min_stock_level, unit, description,
+            component = Component(
+                name=name,
+                category_id=category_id,
+                lab_id=lab_id,
+                quantity=quantity,
+                min_stock_level=min_stock_level,
+                unit=unit,
+                description=description,
                 component_type=component_type
             )
+            db.session.add(component)
+            db.session.commit()
             flash("Component added successfully.", "success")
             return redirect(url_for("components"))
 
@@ -323,17 +338,16 @@ def add_component():
         categories=categories
     )
 
-
-@app.route("/components/<component_id>/edit", methods=["GET", "POST"])
+@app.route("/components/<int:component_id>/edit", methods=["GET", "POST"])
 @login_required
 def edit_component(component_id):
-    component = ComponentModel.get_by_id(db, component_id)
+    component = Component.query.get(component_id)
     if not component:
         flash("Component not found.", "danger")
         return redirect(url_for("components"))
 
-    labs = LabModel.get_all(db)
-    categories = CategoryModel.get_all(db)
+    labs = Lab.query.order_by(Lab.name).all()
+    categories = Category.query.order_by(Category.name).all()
 
     if request.method == "POST":
         name = request.form.get("name", "").strip()
@@ -348,11 +362,17 @@ def edit_component(component_id):
         if not (name and category_id and lab_id):
             flash("Name, category, and lab are required.", "danger")
         else:
-            ComponentModel.update(
-                db, component_id, name, category_id, lab_id,
-                quantity, min_stock_level, unit, description,
-                component_type=component_type
-            )
+            component.name = name
+            component.category_id = category_id
+            component.lab_id = lab_id
+            component.quantity = quantity
+            component.min_stock_level = min_stock_level
+            component.unit = unit
+            component.description = description
+            component.component_type = component_type
+            component.last_updated = datetime.now(IST)
+            
+            db.session.commit()
             flash("Component updated successfully.", "success")
             return redirect(url_for("components"))
 
@@ -363,32 +383,27 @@ def edit_component(component_id):
         categories=categories
     )
 
-
-@app.route("/components/<component_id>/delete", methods=["POST"])
+@app.route("/components/<int:component_id>/delete", methods=["POST"])
 @login_required
 def delete_component(component_id):
-    ComponentModel.delete(db, component_id)
-    flash("Component deleted.", "info")
+    component = Component.query.get(component_id)
+    if component:
+        db.session.delete(component)
+        db.session.commit()
+        flash("Component deleted.", "info")
     return redirect(url_for("components"))
 
-
-# ---------------------- Transactions (Issue / Return on same line) ---------------------- #
-
+# ---------------------- Transactions ---------------------- #
 @app.route("/transactions")
 @login_required
 def transactions():
-    transactions_list = TransactionModel.get_all(db)
+    transactions_list = Transaction.query.order_by(Transaction.issue_date.desc()).all()
 
-    # Summary by status (Issued / Partially Returned / Completed)
-    status_agg = list(db.transactions.aggregate([
-        {
-            "$group": {
-                "_id": "$status",
-                "count": {"$sum": 1}
-            }
-        }
-    ]))
-    status_counts = {item["_id"] or "Unknown": item["count"] for item in status_agg}
+    # Summary by status
+    status_counts = {}
+    for status in ['Issued', 'Partially Returned', 'Completed']:
+        count = Transaction.query.filter_by(status=status).count()
+        status_counts[status] = count
 
     return render_template(
         "transactions.html",
@@ -396,46 +411,35 @@ def transactions():
         status_counts=status_counts
     )
 
-
 @app.route("/transactions/add", methods=["GET", "POST"])
 @login_required
 def add_transaction():
-    components = list(db.components.find().sort("name", 1))
-    labs = LabModel.get_all(db)
-
-    # Add a helper string lab_id for each component (for Jinja/JS)
-    for c in components:
-        if c.get("lab_id"):
-            c["lab_id_str"] = str(c["lab_id"])
-        else:
-            c["lab_id_str"] = ""
+    components = Component.query.order_by(Component.name).all()
+    labs = Lab.query.order_by(Lab.name).all()
 
     preselected_component_id = request.args.get("component_id")
     preselected_type = request.args.get("transaction_type") or "issue"
     preselected_lab_id = None
 
-    # If opened from Components "Issue/Return" quick action, auto-detect lab
     if preselected_component_id:
-        comp = db.components.find_one({"_id": ObjectId(preselected_component_id)})
-        if comp and comp.get("lab_id"):
-            preselected_lab_id = str(comp["lab_id"])
+        comp = Component.query.get(preselected_component_id)
+        if comp:
+            preselected_lab_id = comp.lab_id
 
     if request.method == "POST":
         transaction_type = request.form.get("transaction_type")
         component_id = request.form.get("component_id")
-        lab_id = request.form.get("from_lab_id") or None
-        campus = request.form.get("from_campus", "").strip() or None
+        lab_id = request.form.get("from_lab_id")
+        campus = request.form.get("from_campus", "").strip()
         person_name = request.form.get("person_name", "").strip()
         purpose = request.form.get("purpose", "").strip()
         notes = request.form.get("notes", "").strip()
         transaction_quantity_raw = request.form.get("transaction_quantity") or "0"
 
-        # Keep selections on error
         preselected_component_id = component_id
         preselected_lab_id = lab_id
         preselected_type = transaction_type
 
-        # Validate quantity
         try:
             qty = int(transaction_quantity_raw)
         except ValueError:
@@ -460,7 +464,6 @@ def add_transaction():
                 preselected_lab_id=preselected_lab_id
             )
 
-        # Basic required fields
         if not lab_id:
             flash("Please select a lab first.", "danger")
             return render_template(
@@ -478,7 +481,7 @@ def add_transaction():
                 "add_transaction.html",
                 components=components,
                 labs=labs,
-                preselected_component_id=preselected_component_id,
+                preselected_component_id=None,
                 preselected_type=preselected_type,
                 preselected_lab_id=preselected_lab_id
             )
@@ -494,7 +497,7 @@ def add_transaction():
                 preselected_lab_id=preselected_lab_id
             )
 
-        component = db.components.find_one({"_id": ObjectId(component_id)})
+        component = Component.query.get(component_id)
         if not component:
             flash("Component not found.", "danger")
             return render_template(
@@ -506,18 +509,11 @@ def add_transaction():
                 preselected_lab_id=preselected_lab_id
             )
 
-        # Business logic using new model
         try:
             if transaction_type == "issue":
-                TransactionModel.create_issue(
-                    db, component, lab_id, campus,
-                    person_name, qty, purpose, notes
-                )
+                create_issue_transaction(component, lab_id, campus, person_name, qty, purpose, notes)
             elif transaction_type == "return":
-                TransactionModel.add_return(
-                    db, component, lab_id, campus,
-                    person_name, qty, purpose, notes
-                )
+                create_return_transaction(component, lab_id, campus, person_name, qty, purpose, notes)
             else:
                 flash("Invalid transaction type.", "danger")
                 return render_template(
@@ -542,7 +538,6 @@ def add_transaction():
         flash("Transaction recorded successfully.", "success")
         return redirect(url_for("transactions"))
 
-    # GET request
     return render_template(
         "add_transaction.html",
         components=components,
@@ -552,21 +547,140 @@ def add_transaction():
         preselected_lab_id=preselected_lab_id
     )
 
+def create_issue_transaction(component, lab_id, campus, person_name, qty, purpose, notes):
+    current_stock = component.quantity or 0
 
-@app.route("/transactions/<transaction_id>/edit", methods=["GET", "POST"])
+    if qty > current_stock:
+        raise ValueError(
+            f"Cannot issue {qty} units. Only {current_stock} available in stock."
+        )
+
+    quantity_after = current_stock - qty
+    now = datetime.now(IST)
+
+    # Find existing open transaction
+    existing = Transaction.query.filter_by(
+        component_id=component.id,
+        lab_id=lab_id,
+        campus=campus,
+        person_name=person_name,
+        purpose=purpose,
+        status__in=["Issued", "Partially Returned"]
+    ).first()
+
+    if existing:
+        new_issued = existing.qty_issued + qty
+        qty_returned = existing.qty_returned
+        pending = new_issued - qty_returned
+        status = "Issued" if qty_returned == 0 else (
+            "Completed" if pending <= 0 else "Partially Returned"
+        )
+
+        existing.qty_issued = new_issued
+        existing.pending_qty = pending
+        existing.status = status
+        existing.quantity_before = current_stock
+        existing.quantity_after = quantity_after
+        existing.last_action = "issue"
+        existing.transaction_quantity = qty
+        existing.date = now
+        existing.last_updated = now
+        existing.notes = notes or existing.notes
+    else:
+        transaction = Transaction(
+            component_id=component.id,
+            lab_id=lab_id,
+            campus=campus,
+            person_name=person_name,
+            purpose=purpose,
+            qty_issued=qty,
+            qty_returned=0,
+            pending_qty=qty,
+            status="Issued",
+            issue_date=now,
+            date=now,
+            quantity_before=current_stock,
+            quantity_after=quantity_after,
+            transaction_quantity=qty,
+            last_action="issue",
+            notes=notes
+        )
+        db.session.add(transaction)
+
+    # Update component stock
+    component.quantity = quantity_after
+    component.last_updated = now
+    db.session.commit()
+
+def create_return_transaction(component, lab_id, campus, person_name, qty, purpose, notes):
+    current_stock = component.quantity or 0
+    now = datetime.now(IST)
+
+    # Find existing open transaction
+    existing = Transaction.query.filter_by(
+        component_id=component.id,
+        lab_id=lab_id,
+        campus=campus,
+        person_name=person_name,
+        purpose=purpose,
+        status__in=["Issued", "Partially Returned"]
+    ).first()
+
+    if not existing:
+        raise ValueError(
+            "No matching issued transaction found to return against "
+            "(check Component / Lab / Campus / Person / Purpose)."
+        )
+
+    qty_issued = existing.qty_issued
+    qty_returned = existing.qty_returned
+    pending = qty_issued - qty_returned
+
+    if pending <= 0:
+        raise ValueError("No pending quantity left to return for this transaction.")
+
+    if qty > pending:
+        raise ValueError(
+            f"Return quantity ({qty}) cannot exceed pending quantity ({pending})."
+        )
+
+    new_returned = qty_returned + qty
+    new_pending = qty_issued - new_returned
+    status = "Completed" if new_pending <= 0 else "Partially Returned"
+    quantity_after = current_stock + qty
+
+    existing.qty_returned = new_returned
+    existing.pending_qty = new_pending
+    existing.status = status
+    existing.quantity_before = current_stock
+    existing.quantity_after = quantity_after
+    existing.last_action = "return"
+    existing.transaction_quantity = qty
+    existing.date = now
+    existing.last_updated = now
+    existing.notes = (existing.notes or "") + (
+        f"\nReturn: {notes}" if notes else ""
+    )
+
+    # Update component stock
+    component.quantity = quantity_after
+    component.last_updated = now
+    db.session.commit()
+
+@app.route("/transactions/<int:transaction_id>/edit", methods=["GET", "POST"])
 @login_required
 def edit_transaction(transaction_id):
-    txn = db.transactions.find_one({"_id": ObjectId(transaction_id)})
+    txn = Transaction.query.get(transaction_id)
     if not txn:
         flash("Transaction not found.", "danger")
         return redirect(url_for("transactions"))
 
-    component = db.components.find_one({"_id": txn["component_id"]})
-    lab = db.labs.find_one({"_id": txn["lab_id"]}) if txn.get("lab_id") else None
+    component = txn.component
+    lab = txn.lab
 
-    qty_issued = int(txn.get("qty_issued", 0))
-    qty_returned = int(txn.get("qty_returned", 0))
-    pending = int(txn.get("pending_qty", qty_issued - qty_returned))
+    qty_issued = txn.qty_issued or 0
+    qty_returned = txn.qty_returned or 0
+    pending = txn.pending_qty or (qty_issued - qty_returned)
 
     if request.method == "POST":
         return_now_raw = request.form.get("return_now") or "0"
@@ -583,14 +697,13 @@ def edit_transaction(transaction_id):
             return redirect(url_for("transactions"))
 
         try:
-            TransactionModel.add_return(
-                db,
+            create_return_transaction(
                 component,
-                str(txn.get("lab_id")) if txn.get("lab_id") else None,
-                txn.get("campus"),
-                txn.get("person_name", ""),
+                txn.lab_id,
+                txn.campus,
+                txn.person_name,
                 return_now,
-                txn.get("purpose", ""),
+                txn.purpose,
                 notes
             )
         except ValueError as e:
@@ -610,21 +723,20 @@ def edit_transaction(transaction_id):
         pending=pending
     )
 
-
-@app.route("/transactions/<transaction_id>/view")
+@app.route("/transactions/<int:transaction_id>/view")
 @login_required
 def view_transaction(transaction_id):
-    txn = db.transactions.find_one({"_id": ObjectId(transaction_id)})
+    txn = Transaction.query.get(transaction_id)
     if not txn:
         flash("Transaction not found.", "danger")
         return redirect(url_for("transactions"))
 
-    component = db.components.find_one({"_id": txn["component_id"]})
-    lab = db.labs.find_one({"_id": txn["lab_id"]}) if txn.get("lab_id") else None
+    component = txn.component
+    lab = txn.lab
 
-    qty_issued = int(txn.get("qty_issued", 0))
-    qty_returned = int(txn.get("qty_returned", 0))
-    pending = int(txn.get("pending_qty", qty_issued - qty_returned))
+    qty_issued = txn.qty_issued or 0
+    qty_returned = txn.qty_returned or 0
+    pending = txn.pending_qty or (qty_issued - qty_returned)
 
     return render_template(
         "view_transaction.html",
@@ -636,68 +748,36 @@ def view_transaction(transaction_id):
         pending=pending
     )
 
-
 # ---------------------- Reports ---------------------- #
 @app.route("/reports")
 @login_required
 def reports():
     # Components by lab
-    by_lab_pipeline = [
-        {
-            "$lookup": {
-                "from": "labs",
-                "localField": "lab_id",
-                "foreignField": "_id",
-                "as": "lab"
-            }
-        },
-        {"$unwind": {"path": "$lab", "preserveNullAndEmptyArrays": True}},
-        {
-            "$group": {
-                "_id": "$lab.name",
-                "count": {"$sum": 1}
-            }
-        },
-        {"$sort": {"_id": 1}}
-    ]
-    components_by_lab = list(db.components.aggregate(by_lab_pipeline))
+    components_by_lab = db.session.query(
+        Lab.name,
+        db.func.count(Component.id).label('count')
+    ).join(
+        Component, Lab.id == Component.lab_id, isouter=True
+    ).group_by(Lab.id).order_by(Lab.name).all()
 
     # Components by category
-    by_cat_pipeline = [
-        {
-            "$lookup": {
-                "from": "categories",
-                "localField": "category_id",
-                "foreignField": "_id",
-                "as": "category"
-            }
-        },
-        {"$unwind": {"path": "$category", "preserveNullAndEmptyArrays": True}},
-        {
-            "$group": {
-                "_id": "$category.name",
-                "count": {"$sum": 1}
-            }
-        },
-        {"$sort": {"_id": 1}}
-    ]
-    components_by_category = list(db.components.aggregate(by_cat_pipeline))
+    components_by_category = db.session.query(
+        Category.name,
+        db.func.count(Component.id).label('count')
+    ).join(
+        Component, Category.id == Component.category_id, isouter=True
+    ).group_by(Category.id).order_by(Category.name).all()
 
     # Low stock list
-    low_stock_components = list(db.components.find({
-        "$expr": {"$lte": ["$quantity", "$min_stock_level"]}
-    }).sort("name", 1))
+    low_stock_components = Component.query.filter(
+        Component.quantity <= Component.min_stock_level
+    ).order_by(Component.name).all()
 
     # Transaction counts by status
-    transaction_type_counts = list(db.transactions.aggregate([
-        {
-            "$group": {
-                "_id": "$status",
-                "count": {"$sum": 1}
-            }
-        },
-        {"$sort": {"_id": 1}}
-    ]))
+    transaction_type_counts = db.session.query(
+        Transaction.status,
+        db.func.count(Transaction.id).label('count')
+    ).group_by(Transaction.status).order_by(Transaction.status).all()
 
     return render_template(
         "reports.html",
@@ -707,6 +787,19 @@ def reports():
         transaction_type_counts=transaction_type_counts
     )
 
+# ---------------------- Create Admin User ---------------------- #
+@app.before_first_request
+def create_admin():
+    admin = User.query.filter_by(username='admin').first()
+    if not admin:
+        admin = User(
+            username='admin',
+            email='admin@example.com',
+            role='admin'
+        )
+        admin.set_password('admin123')
+        db.session.add(admin)
+        db.session.commit()
 
 if __name__ == "__main__":
     app.run(debug=True)
