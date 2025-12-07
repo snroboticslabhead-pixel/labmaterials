@@ -564,8 +564,9 @@ def create_issue_transaction(component, lab_id, campus, person_name, qty, purpos
         lab_id=lab_id,
         campus=campus,
         person_name=person_name,
-        purpose=purpose,
-        status__in=["Issued", "Partially Returned"]
+        purpose=purpose
+    ).filter(
+        Transaction.status.in_(["Issued", "Partially Returned"])
     ).first()
 
     if existing:
@@ -622,8 +623,9 @@ def create_return_transaction(component, lab_id, campus, person_name, qty, purpo
         lab_id=lab_id,
         campus=campus,
         person_name=person_name,
-        purpose=purpose,
-        status__in=["Issued", "Partially Returned"]
+        purpose=purpose
+    ).filter(
+        Transaction.status.in_(["Issued", "Partially Returned"])
     ).first()
 
     if not existing:
@@ -788,19 +790,23 @@ def reports():
     )
 
 # ---------------------- Create Admin User ---------------------- #
-@app.before_first_request
 def create_admin():
-    admin = User.query.filter_by(username='admin').first()
-    if not admin:
-        admin = User(
-            username='admin',
-            email='admin@example.com',
-            role='admin'
-        )
-        admin.set_password('admin123')
-        db.session.add(admin)
-        db.session.commit()
+    with app.app_context():
+        db.create_all()  # Create tables
+        admin = User.query.filter_by(username='admin').first()
+        if not admin:
+            admin = User(
+                username='admin',
+                email='admin@example.com',
+                role='admin'
+            )
+            admin.set_password('admin123')
+            db.session.add(admin)
+            db.session.commit()
+            print("Admin user created successfully!")
+
+# Initialize the database and create admin user
+create_admin()
 
 if __name__ == "__main__":
     app.run()
-
