@@ -533,6 +533,7 @@
 </head>
 <body>
 <div class="app-wrapper">
+
     <aside class="sidebar">
         <div class="sidebar-logo">
             <img
@@ -545,42 +546,42 @@
         <ul class="nav-links">
             <li>
                 <a href="{{ url_for('index') }}"
-                   class="nav-link-item {% if request.path == '/' %}active{% endif %}">
+                   class="nav-link-item {% if request.endpoint == 'index' %}active{% endif %}">
                     <i data-lucide="layout-dashboard" class="nav-icon"></i>
                     <span>Dashboard</span>
                 </a>
             </li>
             <li>
                 <a href="{{ url_for('labs') }}"
-                   class="nav-link-item {% if request.path.startswith('/labs') %}active{% endif %}">
+                   class="nav-link-item {% if request.endpoint and 'labs' in request.endpoint %}active{% endif %}">
                     <i data-lucide="graduation-cap" class="nav-icon"></i>
                     <span>Labs</span>
                 </a>
             </li>
             <li>
                 <a href="{{ url_for('categories') }}"
-                   class="nav-link-item {% if request.path.startswith('/categories') %}active{% endif %}">
+                   class="nav-link-item {% if request.endpoint and 'categories' in request.endpoint %}active{% endif %}">
                     <i data-lucide="folder-kanban" class="nav-icon"></i>
                     <span>Categories</span>
                 </a>
             </li>
             <li>
                 <a href="{{ url_for('components') }}"
-                   class="nav-link-item {% if request.path.startswith('/components') %}active{% endif %}">
+                   class="nav-link-item {% if request.endpoint and 'components' in request.endpoint %}active{% endif %}">
                     <i data-lucide="boxes" class="nav-icon"></i>
                     <span>Components</span>
                 </a>
             </li>
             <li>
                 <a href="{{ url_for('transactions') }}"
-                   class="nav-link-item {% if request.path.startswith('/transactions') %}active{% endif %}">
+                   class="nav-link-item {% if request.endpoint and 'transactions' in request.endpoint %}active{% endif %}">
                     <i data-lucide="arrow-left-right" class="nav-icon"></i>
                     <span>Transactions</span>
                 </a>
             </li>
             <li>
                 <a href="{{ url_for('reports') }}"
-                   class="nav-link-item {% if request.path.startswith('/reports') %}active{% endif %}">
+                   class="nav-link-item {% if request.endpoint == 'reports' %}active{% endif %}">
                     <i data-lucide="bar-chart-3" class="nav-icon"></i>
                     <span>Reports</span>
                 </a>
