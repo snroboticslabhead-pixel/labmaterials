@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+
+{% block title %}Transaction History{% endblock %}
+{% block page_title %}Transaction History{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-2">
+    <div class="stat-label">All Transactions</div>
+    <a href="{{ url_for('add_transaction') }}" class="btn btn-soft-primary">Add Transaction</a>
+</div>
+
+<div class="card-soft">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle datatable">
+            <thead>
+            <tr class="small text-muted">
+                <th>Component Name</th>
+                <th>Lab</th>
+                <th>Issued To</th>
+                <th>Campus</th>
+                <th>Qty Issued</th>
+                <th>Qty Returned</th>
+                <th>Pending Qty</th>
+                <th>Purpose</th>
+                <th>Status</th>
+                <th>Issue Date</th>
+                <th>Return Date</th>
+                <th>Actions</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for t in transactions %}
+                <tr>
+                    <td>{{ t.component.name }}</td>
+                    <td>{{ t.lab.name }}</td>
+                    <td>{{ t.person_name }}</td>
+                    <td>{{ t.from_campus or '-' }}</td>
+                    <td>{{ t.transaction_quantity }}</td>
+                    <td>{{ t.total_returned }}</td>
+                    <td>{{ t.pending_qty }}</td>
+                    <td>{{ t.purpose }}</td>
+                    <td>
+                        <span class="badge-status badge-status-{{ 
+                            'instock' if t.status == 'Returned' else 
+                            'low' if t.status == 'Partially Returned' else 
+                            'out' 
+                        }}">
+                            {{ t.status }}
+                        </span>
+                    </td>
+                    <td>{{ t.date.strftime('%d-%m-%Y %H:%M') if t.date }}</td>
+                    <td>{{ t.last_return_date.strftime('%d-%m-%Y %H:%M') if t.last_return_date else '-' }}</td>
+                    <td>
+                        <div class="btn-group" role="group">
+                            <a href="{{ url_for('edit_transaction', transaction_id=t._id) }}"
+                               class="btn btn-sm btn-outline-secondary" title="Edit">
+                                ✏️
+                            </a>
+                            <form method="post" action="{{ url_for('delete_transaction', transaction_id=t._id) }}"
+                                  class="d-inline-block"
+                                  onsubmit="return confirm('Delete this transaction?');">
+                                <button class="btn btn-sm btn-soft-danger" type="submit" title="Delete">
+                                    🗑️
+                                </button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+            {% else %}
+                <tr class="text-center small text-muted">
+                    <td colspan="12">No transactions yet.</td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

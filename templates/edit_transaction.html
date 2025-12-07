@@ -1,0 +1,235 @@
+{% extends "base.html" %}
+
+{% block title %}Edit Transaction{% endblock %}
+{% block page_title %}Edit Transaction{% endblock %}
+
+{% block extra_head %}
+<style>
+    .detail-grid {
+        row-gap: 0.75rem;
+    }
+    .detail-section-title {
+        font-size: 0.8rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: #6b7280;
+        margin-bottom: 0.35rem;
+    }
+    .detail-item-label {
+        font-size: 0.8rem;
+        color: #6b7280;
+        margin-bottom: 0.1rem;
+    }
+    .detail-item-value {
+        font-size: 0.95rem;
+        font-weight: 500;
+    }
+    .detail-item {
+        margin-bottom: 0.4rem;
+    }
+
+    /* Buttons on this page */
+    .edit-tx-btn {
+        border-radius: 999px;
+        padding: 0.55rem 1.4rem;
+        font-size: 0.9rem;
+    }
+
+    @media (max-width: 575.98px) {
+        .detail-item-value {
+            font-size: 1rem;
+        }
+        .detail-section-title {
+            font-size: 0.82rem;
+        }
+
+        .edit-tx-btn {
+            width: 100%;
+            font-size: 0.95rem;
+            padding: 0.65rem 1.5rem;
+        }
+
+        .card-soft {
+            padding-top: 0.85rem;
+            padding-bottom: 0.85rem;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card-soft mb-3">
+    <div class="d-flex justify-content-between flex-wrap gap-2">
+        <div>
+            <div class="stat-label mb-1">Edit Transaction / Record Return</div>
+            <div class="small text-muted">
+                Use this page to record how many items are returned against this issue.
+                The same line will keep Issued, Returned and Pending together.
+            </div>
+        </div>
+        <div class="text-end small text-muted">
+            <div>
+                <strong>Component:</strong>
+                {{ component.name if component else 'Unknown' }}
+            </div>
+            <div>
+                <strong>Status:</strong>
+                {{ txn.status or 'Issued' }}
+            </div>
+            <div>
+                <strong>Transaction ID:</strong>
+                {{ txn._id }}
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card-soft">
+    <form method="post" class="row g-3">
+
+        <!-- BASIC INFO -->
+        <div class="col-12">
+            <div class="detail-section-title">Basic Information</div>
+            <div class="row g-3 small detail-grid">
+                <div class="col-6 col-md-4 detail-item">
+                    <div class="detail-item-label">Component</div>
+                    <div class="detail-item-value">
+                        {{ component.name if component else 'Unknown' }}
+                    </div>
+                </div>
+
+                <div class="col-6 col-md-4 detail-item">
+                    <div class="detail-item-label">Lab</div>
+                    <div class="detail-item-value">
+                        {{ lab.name if lab else '-' }}
+                    </div>
+                </div>
+
+                <div class="col-6 col-md-4 detail-item">
+                    <div class="detail-item-label">Campus</div>
+                    <div class="detail-item-value">
+                        {{ txn.campus or '-' }}
+                    </div>
+                </div>
+
+                <div class="col-6 col-md-4 detail-item">
+                    <div class="detail-item-label">Issued To</div>
+                    <div class="detail-item-value">
+                        {{ txn.person_name or '-' }}
+                    </div>
+                </div>
+
+                <div class="col-6 col-md-4 detail-item">
+                    <div class="detail-item-label">Purpose</div>
+                    <div class="detail-item-value">
+                        {{ txn.purpose or '-' }}
+                    </div>
+                </div>
+
+                <div class="col-6 col-md-4 detail-item">
+                    <div class="detail-item-label">Issue Date (IST)</div>
+                    <div class="detail-item-value">
+                        {{ txn.issue_date.strftime('%d %b %Y, %I:%M %p') if txn.issue_date else '-' }}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- SUMMARY -->
+        <div class="col-12">
+            <div class="detail-section-title">Current Issue / Return Summary</div>
+            <div class="row g-3 small detail-grid">
+                <div class="col-6 col-md-3 detail-item">
+                    <div class="detail-item-label">Total Issued</div>
+                    <div class="detail-item-value">
+                        {{ qty_issued }}
+                    </div>
+                </div>
+
+                <div class="col-6 col-md-3 detail-item">
+                    <div class="detail-item-label">Total Returned</div>
+                    <div class="detail-item-value">
+                        {{ qty_returned }}
+                    </div>
+                </div>
+
+                <div class="col-6 col-md-3 detail-item">
+                    <div class="detail-item-label">Pending</div>
+                    <div class="detail-item-value">
+                        {% if pending > 0 %}
+                            <span class="badge-status badge-status-out">{{ pending }}</span>
+                        {% else %}
+                            <span class="badge-status badge-status-instock">{{ pending }}</span>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <div class="col-6 col-md-3 detail-item">
+                    <div class="detail-item-label">Status</div>
+                    <div class="detail-item-value">
+                        {{ txn.status or 'Unknown' }}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- RETURN INPUT -->
+        <div class="col-12">
+            <div class="detail-section-title">Record Return Now</div>
+            <div class="row g-3 small detail-grid">
+                <div class="col-6 col-md-4 detail-item">
+                    <div class="detail-item-label">
+                        Return Quantity
+                        {% if pending > 0 %}
+                            <span class="text-muted">(max {{ pending }})</span>
+                        {% endif %}
+                    </div>
+                    {% if pending > 0 %}
+                        <div class="detail-item-value">
+                            <input type="number"
+                                   name="return_now"
+                                   class="form-control"
+                                   min="0"
+                                   max="{{ pending }}"
+                                   value="{{ pending }}">
+                        </div>
+                    {% else %}
+                        <div class="detail-item-value">
+                            <input type="number"
+                                   class="form-control"
+                                   value="0"
+                                   disabled>
+                            <div class="small text-muted mt-1">
+                                No pending quantity left to return.
+                            </div>
+                        </div>
+                    {% endif %}
+                </div>
+
+                <div class="col-12 col-md-8 detail-item">
+                    <div class="detail-item-label">Notes for this return (optional)</div>
+                    <div class="detail-item-value">
+                        <textarea name="notes"
+                                  class="form-control"
+                                  rows="2"
+                                  placeholder="Example: partial return from project, some items still in use"></textarea>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ACTION BUTTONS -->
+        <div class="col-12 d-flex flex-column flex-md-row justify-content-between gap-2 mt-2">
+            <a href="{{ url_for('transactions') }}"
+               class="btn btn-outline-secondary edit-tx-btn">
+                Back to Transactions
+            </a>
+            <button type="submit"
+                    class="btn btn-soft-primary edit-tx-btn"
+                    {% if pending <= 0 %}disabled{% endif %}>
+                Save Return
+            </button>
+        </div>
+    </form>
+</div>
+{% endblock %}

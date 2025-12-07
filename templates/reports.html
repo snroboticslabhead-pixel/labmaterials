@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+
+{% block title %}Reports{% endblock %}
+{% block page_title %}Reports{% endblock %}
+
+{% block content %}
+
+<div class="row g-3 mb-3">
+    <div class="col-md-6 col-12">
+        <div class="card-soft h-100">
+            <div class="stat-label mb-2">Transaction Counts by Status</div>
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <thead class="small text-muted">
+                    <tr>
+                        <th>Status</th>
+                        <th class="text-end">Count</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {% for t in transaction_type_counts %}
+                        <tr>
+                            <td>{{ t._id or 'Unknown' }}</td>
+                            <td class="text-end">{{ t.count }}</td>
+                        </tr>
+                    {% else %}
+                        <tr class="small text-muted">
+                            <td colspan="2" class="text-center">No transactions yet.</td>
+                        </tr>
+                    {% endfor %} </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6 col-12">
+        <div class="card-soft h-100">
+            <div class="stat-label mb-2">Low Stock Summary</div>
+            <div class="small text-muted mb-2">
+                Components with quantity less than or equal to minimum stock level.
+            </div>
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <thead class="small text-muted">
+                    <tr>
+                        <th>Component</th>
+                        <th class="d-none d-sm-table-cell">Lab</th>
+                        <th class="text-end">Qty</th>
+                        <th class="text-end">Min</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {% for c in low_stock_components %}
+                        <tr>
+                            <td>
+                                <div class="fw-semibold small">{{ c.name }}</div>
+                                <div class="small text-muted d-sm-none">
+                                    Qty {{ c.quantity }} · Min {{ c.min_stock_level }}
+                                </div>
+                            </td>
+                            <td class="d-none d-sm-table-cell small">
+                                {{ c.lab_name if c.lab_name else '-' }}
+                            </td>
+                            <td class="text-end small">{{ c.quantity }}</td>
+                            <td class="text-end small">{{ c.min_stock_level }}</td>
+                        </tr>
+                    {% else %}
+                        <tr class="small text-muted">
+                            <td colspan="4" class="text-center">No low-stock items.</td>
+                        </tr>
+                    {% endfor %} </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3">
+    <div class="col-lg-6 col-12">
+        <div class="card-soft">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <div class="stat-label">Components by Lab</div>
+                <div class="small text-muted">Count of components per lab</div>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-hover table-sm align-middle datatable">
+                    <thead class="small text-muted">
+                    <tr>
+                        <th>Lab</th>
+                        <th class="text-end">Components</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {% for row in components_by_lab %}
+                        <tr>
+                            <td>{{ row._id or 'Unassigned' }}</td>
+                            <td class="text-end">{{ row.count }}</td>
+                        </tr>
+                    {% else %}
+                        <tr class="small text-muted">
+                            <td colspan="2" class="text-center">No data yet.</td>
+                        </tr>
+                    {% endfor %} </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-6 col-12">
+        <div class="card-soft">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <div class="stat-label">Components by Category</div>
+                <div class="small text-muted">Count of components per category</div>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-hover table-sm align-middle datatable">
+                    <thead class="small text-muted">
+                    <tr>
+                        <th>Category</th>
+                        <th class="text-end">Components</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {% for row in components_by_category %}
+                        <tr>
+                            <td>{{ row._id or 'Unassigned' }}</td>
+                            <td class="text-end">{{ row.count }}</td>
+                        </tr>
+                    {% else %}
+                        <tr class="small text-muted">
+                            <td colspan="2" class="text-center">No data yet.</td>
+                        </tr>
+                    {% endfor %} </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
