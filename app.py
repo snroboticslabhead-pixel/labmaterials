@@ -510,7 +510,7 @@ def add_transaction():
         preselected_type = request.args.get("transaction_type") or "issue"
         preselected_lab_id = None
 
-        # If opened from Components "Issue/Return" quick action, auto-detect lab
+        # If opened from Components "Issue/Return" quick action
         if preselected_component_id:
             comp = ComponentModel.get_by_id(conn, preselected_component_id)
             if comp and comp.get("lab_id"):
