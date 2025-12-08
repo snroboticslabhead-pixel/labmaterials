@@ -1,715 +1,322 @@
+import mysql.connector
 from datetime import datetime
-from zoneinfo import ZoneInfo   # Python 3.9+
+from werkzeug.security import generate_password_hash, check_password_hash
 
-IST = ZoneInfo("Asia/Kolkata")  # Indian time
+# Helper to get Dictionary Cursors (makes rows look like Python Dicts)
+def get_db_connection(config):
+    conn = mysql.connector.connect(
+        host=config.MYSQL_HOST,
+        user=config.MYSQL_USER,
+        password=config.MYSQL_PASSWORD,
+        database=config.MYSQL_DB
+    )
+    return conn
 
+class Schema:
+    @staticmethod
+    def create_tables(config):
+        conn = get_db_connection(config)
+        cursor = conn.cursor()
+        
+        # 1. Users Table (From your prompt)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                username VARCHAR(80) UNIQUE NOT NULL,
+                email VARCHAR(120) UNIQUE NOT NULL,
+                password VARCHAR(255) NOT NULL,
+                role ENUM('admin', 'trainer') NOT NULL DEFAULT 'admin',
+                lab_id INT,
+                lab_name VARCHAR(255),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # 2. Labs Table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS labs (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                location VARCHAR(100),
+                description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # 3. Categories Table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS categories (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                description TEXT,
+                lab_id INT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (lab_id) REFERENCES labs(id) ON DELETE SET NULL
+            )
+        ''')
+
+        # 4. Components Table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS components (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(150) NOT NULL,
+                category_id INT,
+                lab_id INT,
+                quantity INT DEFAULT 0,
+                min_stock_level INT DEFAULT 0,
+                unit VARCHAR(50),
+                description TEXT,
+                component_type VARCHAR(50) DEFAULT 'Other',
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL,
+                FOREIGN KEY (lab_id) REFERENCES labs(id) ON DELETE SET NULL
+            )
+        ''')
+
+        # 5. Transactions Table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                component_id INT NOT NULL,
+                lab_id INT,
+                campus VARCHAR(100),
+                person_name VARCHAR(100),
+                purpose TEXT,
+                qty_issued INT DEFAULT 0,
+                qty_returned INT DEFAULT 0,
+                pending_qty INT DEFAULT 0,
+                status VARCHAR(50), 
+                notes TEXT,
+                issue_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                FOREIGN KEY (component_id) REFERENCES components(id) ON DELETE CASCADE,
+                FOREIGN KEY (lab_id) REFERENCES labs(id) ON DELETE SET NULL
+            )
+        ''')
+        
+        # Create a default admin user if none exists
+        cursor.execute("SELECT * FROM users WHERE username = 'admin'")
+        if not cursor.fetchone():
+            hashed_pw = generate_password_hash("admin123")
+            cursor.execute('''
+                INSERT INTO users (username, email, password, role) 
+                VALUES (%s, %s, %s, 'admin')
+            ''', ('admin', 'admin@example.com', hashed_pw))
+            
+        conn.commit()
+        cursor.close()
+        conn.close()
 
 class LabModel:
-    table = "labs"
+    @staticmethod
+    def get_all(cursor):
+        cursor.execute("SELECT * FROM labs ORDER BY name")
+        return cursor.fetchall()
 
     @staticmethod
-    def get_all(db):
-        with db.cursor() as cur:
-            cur.execute(
-                f"SELECT id, name, location, description, created_at "
-                f"FROM {LabModel.table} ORDER BY name ASC"
-            )
-            rows = cur.fetchall()
-        for r in rows:
-            r["_id"] = r["id"]
-        return rows
+    def get_by_id(cursor, lab_id):
+        cursor.execute("SELECT * FROM labs WHERE id = %s", (lab_id,))
+        return cursor.fetchone()
 
     @staticmethod
-    def get_by_id(db, lab_id):
-        with db.cursor() as cur:
-            cur.execute(
-                f"SELECT id, name, location, description, created_at "
-                f"FROM {LabModel.table} WHERE id = %s",
-                (int(lab_id),),
-            )
-            lab = cur.fetchone()
-        if lab:
-            lab["_id"] = lab["id"]
-        return lab
+    def create(cursor, name, location, description):
+        cursor.execute(
+            "INSERT INTO labs (name, location, description) VALUES (%s, %s, %s)",
+            (name, location, description)
+        )
 
     @staticmethod
-    def create(db, name, location, description):
-        now = datetime.now(IST)
-        with db.cursor() as cur:
-            cur.execute(
-                f"""
-                INSERT INTO {LabModel.table}
-                    (name, location, description, created_at)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (name, location, description, now),
-            )
+    def update(cursor, lab_id, name, location, description):
+        cursor.execute(
+            "UPDATE labs SET name=%s, location=%s, description=%s WHERE id=%s",
+            (name, location, description, lab_id)
+        )
 
     @staticmethod
-    def update(db, lab_id, name, location, description):
-        with db.cursor() as cur:
-            cur.execute(
-                f"""
-                UPDATE {LabModel.table}
-                SET name=%s, location=%s, description=%s
-                WHERE id=%s
-                """,
-                (name, location, description, int(lab_id)),
-            )
-
-    @staticmethod
-    def delete(db, lab_id):
-        with db.cursor() as cur:
-            cur.execute(
-                f"DELETE FROM {LabModel.table} WHERE id=%s",
-                (int(lab_id),),
-            )
-
+    def delete(cursor, lab_id):
+        cursor.execute("DELETE FROM labs WHERE id = %s", (lab_id,))
 
 class CategoryModel:
-    table = "categories"
-
     @staticmethod
-    def get_all(db):
+    def get_all(cursor):
+        # Join with Labs to get lab name, count components
+        query = """
+            SELECT c.*, l.name as lab_name,
+            (SELECT COUNT(*) FROM components comp WHERE comp.category_id = c.id) as component_count,
+            (SELECT COALESCE(SUM(quantity),0) FROM components comp WHERE comp.category_id = c.id) as total_quantity
+            FROM categories c
+            LEFT JOIN labs l ON c.lab_id = l.id
+            ORDER BY c.name
         """
-        Returns categories enriched with:
-          - lab (joined)
-          - component_count (number of components under this category in that lab)
-          - total_quantity (sum of quantities of those components)
-        """
-        sql = """
-        SELECT
-            c.id,
-            c.name,
-            c.description,
-            c.lab_id,
-            c.created_at,
-            l.name AS lab_name,
-            COUNT(comp.id) AS component_count,
-            COALESCE(SUM(comp.quantity), 0) AS total_quantity
-        FROM categories c
-        LEFT JOIN labs l ON c.lab_id = l.id
-        LEFT JOIN components comp
-            ON comp.category_id = c.id
-           AND comp.lab_id = c.lab_id
-        GROUP BY
-            c.id, c.name, c.description, c.lab_id, c.created_at, l.name
-        ORDER BY
-            l.name ASC, c.name ASC
-        """
-        with db.cursor() as cur:
-            cur.execute(sql)
-            rows = cur.fetchall()
-
-        for r in rows:
-            r["_id"] = r["id"]
-            r["lab"] = {
-                "_id": r["lab_id"],
-                "name": r["lab_name"],
-            }
-        return rows
+        cursor.execute(query)
+        return cursor.fetchall()
 
     @staticmethod
-    def get_by_id(db, category_id):
-        with db.cursor() as cur:
-            cur.execute(
-                f"""
-                SELECT id, name, description, lab_id, created_at
-                FROM {CategoryModel.table}
-                WHERE id = %s
-                """,
-                (int(category_id),),
-            )
-            cat = cur.fetchone()
-        if cat:
-            cat["_id"] = cat["id"]
-        return cat
+    def get_by_id(cursor, cat_id):
+        cursor.execute("SELECT * FROM categories WHERE id = %s", (cat_id,))
+        return cursor.fetchone()
 
     @staticmethod
-    def create(db, name, description, lab_id):
-        now = datetime.now(IST)
-        lab_id_int = int(lab_id) if lab_id else None
-        with db.cursor() as cur:
-            cur.execute(
-                f"""
-                INSERT INTO {CategoryModel.table}
-                    (name, description, lab_id, created_at)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (name, description, lab_id_int, now),
-            )
+    def create(cursor, name, description, lab_id):
+        cursor.execute(
+            "INSERT INTO categories (name, description, lab_id) VALUES (%s, %s, %s)",
+            (name, description, lab_id or None)
+        )
 
     @staticmethod
-    def update(db, category_id, name, description, lab_id):
-        lab_id_int = int(lab_id) if lab_id else None
-        with db.cursor() as cur:
-            cur.execute(
-                f"""
-                UPDATE {CategoryModel.table}
-                SET name=%s, description=%s, lab_id=%s
-                WHERE id=%s
-                """,
-                (name, description, lab_id_int, int(category_id)),
-            )
+    def update(cursor, cat_id, name, description, lab_id):
+        cursor.execute(
+            "UPDATE categories SET name=%s, description=%s, lab_id=%s WHERE id=%s",
+            (name, description, lab_id or None, cat_id)
+        )
 
     @staticmethod
-    def delete(db, category_id):
-        with db.cursor() as cur:
-            cur.execute(
-                f"DELETE FROM {CategoryModel.table} WHERE id=%s",
-                (int(category_id),),
-            )
-
+    def delete(cursor, cat_id):
+        cursor.execute("DELETE FROM categories WHERE id = %s", (cat_id,))
 
 class ComponentModel:
-    table = "components"
-
     @staticmethod
-    def _attach_relations(rows):
-        for r in rows:
-            r["_id"] = r["id"]
-            r["category"] = {
-                "_id": r.get("category_id"),
-                "name": r.get("category_name"),
-            }
-            r["lab"] = {
-                "_id": r.get("lab_id"),
-                "name": r.get("lab_name"),
-            }
-        return rows
-
-    @staticmethod
-    def get_all(db):
-        sql = """
-        SELECT
-            c.id,
-            c.name,
-            c.category_id,
-            c.lab_id,
-            c.quantity,
-            c.min_stock_level,
-            c.unit,
-            c.description,
-            c.component_type,
-            c.date_added,
-            c.last_updated,
-            cat.name AS category_name,
-            l.name AS lab_name
-        FROM components c
-        LEFT JOIN categories cat ON c.category_id = cat.id
-        LEFT JOIN labs l ON c.lab_id = l.id
-        ORDER BY c.name ASC
+    def get_all(cursor, lab_id=None):
+        base_query = """
+            SELECT c.*, cat.name as category_name, l.name as lab_name 
+            FROM components c
+            LEFT JOIN categories cat ON c.category_id = cat.id
+            LEFT JOIN labs l ON c.lab_id = l.id
         """
-        with db.cursor() as cur:
-            cur.execute(sql)
-            rows = cur.fetchall()
-        return ComponentModel._attach_relations(rows)
+        if lab_id:
+            base_query += " WHERE c.lab_id = %s"
+            base_query += " ORDER BY c.name"
+            cursor.execute(base_query, (lab_id,))
+        else:
+            base_query += " ORDER BY c.name"
+            cursor.execute(base_query)
+        return cursor.fetchall()
 
     @staticmethod
-    def get_by_lab(db, lab_id):
-        sql = """
-        SELECT
-            c.id,
-            c.name,
-            c.category_id,
-            c.lab_id,
-            c.quantity,
-            c.min_stock_level,
-            c.unit,
-            c.description,
-            c.component_type,
-            c.date_added,
-            c.last_updated,
-            cat.name AS category_name,
-            l.name AS lab_name
-        FROM components c
-        LEFT JOIN categories cat ON c.category_id = cat.id
-        LEFT JOIN labs l ON c.lab_id = l.id
-        WHERE c.lab_id = %s
-        ORDER BY c.name ASC
-        """
-        with db.cursor() as cur:
-            cur.execute(sql, (int(lab_id),))
-            rows = cur.fetchall()
-        return ComponentModel._attach_relations(rows)
+    def get_by_id(cursor, comp_id):
+        cursor.execute("SELECT * FROM components WHERE id = %s", (comp_id,))
+        return cursor.fetchone()
 
     @staticmethod
-    def get_by_id(db, component_id):
-        sql = """
-        SELECT
-            c.id,
-            c.name,
-            c.category_id,
-            c.lab_id,
-            c.quantity,
-            c.min_stock_level,
-            c.unit,
-            c.description,
-            c.component_type,
-            c.date_added,
-            c.last_updated,
-            cat.name AS category_name,
-            l.name AS lab_name
-        FROM components c
-        LEFT JOIN categories cat ON c.category_id = cat.id
-        LEFT JOIN labs l ON c.lab_id = l.id
-        WHERE c.id = %s
-        """
-        with db.cursor() as cur:
-            cur.execute(sql, (int(component_id),))
-            row = cur.fetchone()
-        if row:
-            ComponentModel._attach_relations([row])
-            return row
-        return None
+    def create(cursor, name, category_id, lab_id, quantity, min_stock, unit, desc, c_type):
+        cursor.execute("""
+            INSERT INTO components 
+            (name, category_id, lab_id, quantity, min_stock_level, unit, description, component_type)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (name, category_id, lab_id, quantity, min_stock, unit, desc, c_type))
 
     @staticmethod
-    def create(
-        db,
-        name,
-        category_id,
-        lab_id,
-        quantity,
-        min_stock_level,
-        unit,
-        description,
-        component_type="Other",
-    ):
-        now = datetime.now(IST)
-        with db.cursor() as cur:
-            cur.execute(
-                f"""
-                INSERT INTO {ComponentModel.table}
-                    (name, category_id, lab_id, quantity,
-                     min_stock_level, unit, description,
-                     component_type, date_added, last_updated)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    name,
-                    int(category_id),
-                    int(lab_id),
-                    quantity,
-                    min_stock_level,
-                    unit,
-                    description,
-                    component_type or "Other",
-                    now,
-                    now,
-                ),
-            )
+    def update(cursor, comp_id, name, category_id, lab_id, quantity, min_stock, unit, desc, c_type):
+        cursor.execute("""
+            UPDATE components SET 
+            name=%s, category_id=%s, lab_id=%s, quantity=%s, min_stock_level=%s, 
+            unit=%s, description=%s, component_type=%s
+            WHERE id=%s
+        """, (name, category_id, lab_id, quantity, min_stock, unit, desc, c_type, comp_id))
 
     @staticmethod
-    def update(
-        db,
-        component_id,
-        name,
-        category_id,
-        lab_id,
-        quantity,
-        min_stock_level,
-        unit,
-        description,
-        component_type="Other",
-    ):
-        now = datetime.now(IST)
-        with db.cursor() as cur:
-            cur.execute(
-                f"""
-                UPDATE {ComponentModel.table}
-                SET
-                    name=%s,
-                    category_id=%s,
-                    lab_id=%s,
-                    quantity=%s,
-                    min_stock_level=%s,
-                    unit=%s,
-                    description=%s,
-                    component_type=%s,
-                    last_updated=%s
-                WHERE id=%s
-                """,
-                (
-                    name,
-                    int(category_id),
-                    int(lab_id),
-                    quantity,
-                    min_stock_level,
-                    unit,
-                    description,
-                    component_type or "Other",
-                    now,
-                    int(component_id),
-                ),
-            )
+    def delete(cursor, comp_id):
+        cursor.execute("DELETE FROM components WHERE id=%s", (comp_id,))
 
     @staticmethod
-    def delete(db, component_id):
-        with db.cursor() as cur:
-            cur.execute(
-                f"DELETE FROM {ComponentModel.table} WHERE id=%s",
-                (int(component_id),),
-            )
-
-    @staticmethod
-    def enrich_with_status(db, components):
-        # db is unused, kept for compatibility with old calls
+    def enrich_with_status(components):
         for c in components:
-            qty = c.get("quantity", 0) or 0
-            min_stock = c.get("min_stock_level", 0) or 0
-
+            qty = c.get('quantity', 0)
+            min_stock = c.get('min_stock_level', 0)
             if qty <= 0:
-                stock_state = "Out of Stock"
-                stock_class = "out"
+                c['stock_state'] = "Out of Stock"
+                c['stock_class'] = "out"
             elif qty <= min_stock:
-                stock_state = "Low Stock"
-                stock_class = "low"
+                c['stock_state'] = "Low Stock"
+                c['stock_class'] = "low"
             else:
-                stock_state = "In Stock"
-                stock_class = "instock"
-
-            c["stock_state"] = stock_state
-            c["stock_state_class"] = stock_class
-            c["status_label"] = stock_state
-            c["status_detail"] = ""
-
+                c['stock_state'] = "In Stock"
+                c['stock_class'] = "instock"
         return components
 
-
 class TransactionModel:
-    table = "transactions"
+    @staticmethod
+    def get_all(cursor):
+        query = """
+            SELECT t.*, c.name as component_name, l.name as lab_name
+            FROM transactions t
+            LEFT JOIN components c ON t.component_id = c.id
+            LEFT JOIN labs l ON t.lab_id = l.id
+            ORDER BY t.issue_date DESC
+        """
+        cursor.execute(query)
+        return cursor.fetchall()
 
     @staticmethod
-    def get_all(db):
+    def get_recent(cursor, limit=5):
+        query = """
+            SELECT t.*, c.name as component_name 
+            FROM transactions t
+            LEFT JOIN components c ON t.component_id = c.id
+            ORDER BY t.issue_date DESC LIMIT %s
         """
-        Each row = one logical transaction:
-          - qty_issued
-          - qty_returned
-          - pending_qty
-          - status: Issued / Partially Returned / Completed
-        """
-        sql = """
-        SELECT
-            t.*,
-            c.name AS component_name,
-            l.name AS lab_name
-        FROM transactions t
-        LEFT JOIN components c ON t.component_id = c.id
-        LEFT JOIN labs l ON t.lab_id = l.id
-        ORDER BY t.issue_date DESC
-        """
-        with db.cursor() as cur:
-            cur.execute(sql)
-            rows = cur.fetchall()
-
-        for r in rows:
-            r["_id"] = r["id"]
-            r["component"] = {
-                "_id": r.get("component_id"),
-                "name": r.get("component_name"),
-            }
-            r["lab"] = {
-                "_id": r.get("lab_id"),
-                "name": r.get("lab_name"),
-            }
-        return rows
+        cursor.execute(query, (limit,))
+        return cursor.fetchall()
 
     @staticmethod
-    def get_recent(db, limit=5):
-        sql = f"""
-        SELECT
-            id,
-            person_name,
-            last_action,
-            transaction_quantity,
-            quantity_before,
-            quantity_after,
-            date
-        FROM {TransactionModel.table}
-        ORDER BY date DESC
-        LIMIT %s
-        """
-        with db.cursor() as cur:
-            cur.execute(sql, (int(limit),))
-            rows = cur.fetchall()
-        for r in rows:
-            r["_id"] = r["id"]
-        return rows
-
-    @staticmethod
-    def get_by_id(db, transaction_id):
-        sql = """
-        SELECT
-            t.*,
-            c.name AS component_name,
-            l.name AS lab_name
-        FROM transactions t
-        LEFT JOIN components c ON t.component_id = c.id
-        LEFT JOIN labs l ON t.lab_id = l.id
-        WHERE t.id = %s
-        """
-        with db.cursor() as cur:
-            cur.execute(sql, (int(transaction_id),))
-            row = cur.fetchone()
-        if row:
-            row["_id"] = row["id"]
-            row["component"] = {
-                "_id": row.get("component_id"),
-                "name": row.get("component_name"),
-            }
-            row["lab"] = {
-                "_id": row.get("lab_id"),
-                "name": row.get("lab_name"),
-            }
-        return row
-
-    @staticmethod
-    def _find_open_transaction(db, component, lab_id, campus, person_name, purpose):
-        """Find existing open (not completed) transaction for same context."""
-        comp_id = component["_id"]
-        lab_val = int(lab_id) if lab_id else None
-        campus_val = campus or None
-
-        sql = f"""
-        SELECT *
-        FROM {TransactionModel.table}
-        WHERE component_id = %s
-          AND (lab_id = %s OR (lab_id IS NULL AND %s IS NULL))
-          AND (campus = %s OR (campus IS NULL AND %s IS NULL))
-          AND person_name = %s
-          AND purpose = %s
-          AND status IN ('Issued', 'Partially Returned')
-        ORDER BY issue_date DESC
-        LIMIT 1
-        """
-        params = (
-            comp_id,
-            lab_val,
-            lab_val,
-            campus_val,
-            campus_val,
-            person_name,
-            purpose,
-        )
-        with db.cursor() as cur:
-            cur.execute(sql, params)
-            row = cur.fetchone()
-        return row
-
-    @staticmethod
-    def create_issue(
-        db,
-        component,
-        lab_id,
-        campus,
-        person_name,
-        qty,
-        purpose,
-        notes,
-    ):
-        """
-        ISSUE: increase qty_issued on an existing row OR create a new row.
-        Component stock decreases.
-        """
-        now = datetime.now(IST)
-        current_stock = int(component.get("quantity", 0) or 0)
-
+    def create_issue(cursor, comp_id, lab_id, campus, person, qty, purpose, notes):
+        # 1. Check stock
+        cursor.execute("SELECT quantity FROM components WHERE id=%s", (comp_id,))
+        row = cursor.fetchone()
+        current_stock = row['quantity'] if row else 0
+        
         if qty > current_stock:
-            raise ValueError(
-                f"Cannot issue {qty} units. Only {current_stock} available in stock."
-            )
-
-        quantity_after = current_stock - qty
-        lab_oid = int(lab_id) if lab_id else None
-        campus = campus or None
-
-        existing = TransactionModel._find_open_transaction(
-            db, component, lab_id, campus, person_name, purpose
-        )
-
+            raise ValueError(f"Insufficient stock. Available: {current_stock}")
+            
+        # 2. Check existing open transaction
+        cursor.execute("""
+            SELECT * FROM transactions 
+            WHERE component_id=%s AND person_name=%s AND status IN ('Issued', 'Partially Returned')
+        """, (comp_id, person))
+        existing = cursor.fetchone()
+        
         if existing:
-            new_issued = int(existing.get("qty_issued", 0)) + qty
-            qty_returned = int(existing.get("qty_returned", 0))
-            pending = new_issued - qty_returned
-            status = (
-                "Issued"
-                if qty_returned == 0
-                else ("Completed" if pending <= 0 else "Partially Returned")
-            )
-
-            with db.cursor() as cur:
-                cur.execute(
-                    f"""
-                    UPDATE {TransactionModel.table}
-                    SET
-                        qty_issued=%s,
-                        pending_qty=%s,
-                        status=%s,
-                        quantity_before=%s,
-                        quantity_after=%s,
-                        last_action=%s,
-                        transaction_quantity=%s,
-                        date=%s,
-                        last_updated=%s,
-                        notes=%s
-                    WHERE id=%s
-                    """,
-                    (
-                        new_issued,
-                        pending,
-                        status,
-                        current_stock,
-                        quantity_after,
-                        "issue",
-                        qty,
-                        now,
-                        now,
-                        notes or existing.get("notes", ""),
-                        existing["id"],
-                    ),
-                )
-        else:
-            with db.cursor() as cur:
-                cur.execute(
-                    f"""
-                    INSERT INTO {TransactionModel.table}
-                        (component_id, lab_id, campus, person_name, purpose,
-                         qty_issued, qty_returned, pending_qty, status,
-                         issue_date, date,
-                         quantity_before, quantity_after,
-                         transaction_quantity, last_action, notes,
-                         last_updated)
-                    VALUES
-                        (%s, %s, %s, %s, %s,
-                         %s, %s, %s, %s,
-                         %s, %s,
-                         %s, %s,
-                         %s, %s, %s,
-                         %s)
-                    """,
-                    (
-                        component["_id"],
-                        lab_oid,
-                        campus,
-                        person_name,
-                        purpose,
-                        qty,
-                        0,
-                        qty,
-                        "Issued",
-                        now,
-                        now,
-                        current_stock,
-                        quantity_after,
-                        qty,
-                        "issue",
-                        notes,
-                        now,
-                    ),
-                )
-
-        # Update component stock
-        with db.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE components
-                SET quantity=%s, last_updated=%s
+            # Update existing
+            new_issued = existing['qty_issued'] + qty
+            new_pending = new_issued - existing['qty_returned']
+            status = 'Issued' if existing['qty_returned'] == 0 else 'Partially Returned'
+            
+            cursor.execute("""
+                UPDATE transactions SET qty_issued=%s, pending_qty=%s, status=%s, 
+                notes=CONCAT(notes, '\n', %s), last_updated=NOW()
                 WHERE id=%s
-                """,
-                (quantity_after, now, component["_id"]),
-            )
+            """, (new_issued, new_pending, status, f"Added {qty}: {notes}", existing['id']))
+        else:
+            # Create new
+            cursor.execute("""
+                INSERT INTO transactions 
+                (component_id, lab_id, campus, person_name, purpose, qty_issued, qty_returned, pending_qty, status, notes)
+                VALUES (%s, %s, %s, %s, %s, %s, 0, %s, 'Issued', %s)
+            """, (comp_id, lab_id, campus, person, purpose, qty, qty, notes))
+            
+        # 3. Deduct Stock
+        cursor.execute("UPDATE components SET quantity = quantity - %s WHERE id=%s", (qty, comp_id))
 
     @staticmethod
-    def add_return(
-        db,
-        component,
-        lab_id,
-        campus,
-        person_name,
-        qty,
-        purpose,
-        notes,
-    ):
-        """
-        RETURN: update qty_returned on SAME row.
-        Component stock increases.
-        """
-        now = datetime.now(IST)
-        current_stock = int(component.get("quantity", 0) or 0)
-        lab_oid = int(lab_id) if lab_id else None
-        campus = campus or None
-
-        existing = TransactionModel._find_open_transaction(
-            db, component, lab_id, campus, person_name, purpose
-        )
-
-        if not existing:
-            raise ValueError(
-                "No matching issued transaction found to return against "
-                "(check Component / Lab / Campus / Person / Purpose)."
-            )
-
-        qty_issued = int(existing.get("qty_issued", 0))
-        qty_returned = int(existing.get("qty_returned", 0))
-        pending = qty_issued - qty_returned
-
-        if pending <= 0:
-            raise ValueError("No pending quantity left to return for this transaction.")
-
-        if qty > pending:
-            raise ValueError(
-                f"Return quantity ({qty}) cannot exceed pending quantity ({pending})."
-            )
-
-        new_returned = qty_returned + qty
-        new_pending = qty_issued - new_returned
-        status = "Completed" if new_pending <= 0 else "Partially Returned"
-
-        quantity_after = current_stock + qty
-
-        combined_notes = (existing.get("notes") or "") + (
-            f"\nReturn: {notes}" if notes else ""
-        )
-
-        with db.cursor() as cur:
-            cur.execute(
-                f"""
-                UPDATE {TransactionModel.table}
-                SET
-                    qty_returned=%s,
-                    pending_qty=%s,
-                    status=%s,
-                    quantity_before=%s,
-                    quantity_after=%s,
-                    last_action=%s,
-                    transaction_quantity=%s,
-                    date=%s,
-                    last_updated=%s,
-                    notes=%s
-                WHERE id=%s
-                """,
-                (
-                    new_returned,
-                    new_pending,
-                    status,
-                    current_stock,
-                    quantity_after,
-                    "return",
-                    qty,
-                    now,
-                    now,
-                    combined_notes,
-                    existing["id"],
-                ),
-            )
-
-        # Update stock back into component
-        with db.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE components
-                SET quantity=%s, last_updated=%s
-                WHERE id=%s
-                """,
-                (quantity_after, now, component["_id"]),
-            )
+    def add_return(cursor, txn_id, return_qty, notes):
+        cursor.execute("SELECT * FROM transactions WHERE id=%s", (txn_id,))
+        txn = cursor.fetchone()
+        if not txn:
+            raise ValueError("Transaction not found")
+            
+        if return_qty > txn['pending_qty']:
+            raise ValueError(f"Return quantity ({return_qty}) cannot exceed pending ({txn['pending_qty']})")
+            
+        new_returned = txn['qty_returned'] + return_qty
+        new_pending = txn['qty_issued'] - new_returned
+        status = 'Completed' if new_pending == 0 else 'Partially Returned'
+        
+        cursor.execute("""
+            UPDATE transactions SET qty_returned=%s, pending_qty=%s, status=%s, 
+            notes=CONCAT(notes, '\nReturn: ', %s), last_updated=NOW()
+            WHERE id=%s
+        """, (new_returned, new_pending, status, notes, txn_id))
+        
+        # Add Stock Back
+        cursor.execute("UPDATE components SET quantity = quantity + %s WHERE id=%s", 
+                       (return_qty, txn['component_id']))
