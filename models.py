@@ -1,6 +1,5 @@
 from datetime import datetime
-from zoneinfo import ZoneInfo   # Python 3.9+
-# All methods take a plain MySQL connection object as `db`
+from zoneinfo import ZoneInfo   # Python 3.9+ built-in
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -157,7 +156,6 @@ class ComponentModel:
             """)
             rows = cur.fetchall()
 
-        # Shape to mimic previous nested structure
         components = []
         for r in rows:
             comp = dict(r)
@@ -337,7 +335,6 @@ class TransactionModel:
             """)
             rows = cur.fetchall()
 
-        # Shape a bit like previous Mongo version
         txns = []
         for r in rows:
             txn = dict(r)
@@ -557,7 +554,7 @@ class TransactionModel:
             ))
             db.commit()
 
-        # Update component stock
+        # Update stock
         with db.cursor() as cur:
             cur.execute("""
                 UPDATE components
